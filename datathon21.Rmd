@@ -1,0 +1,382 @@
+---
+title: "datathon21"
+author: "Ana y Álvaro"
+date: "3/10/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r,include=FALSE}
+# Libraries
+library(dplyr)
+library(xts)
+library(tidyverse)    
+library(lubridate)
+```
+
+# Enviorenmental and pollution predictors:
+
+## The data and chosen variables
+
+Loading data and obtaining the dataframes.
+```{r message=FALSE, warning=FALSE,include=FALSE}
+load("SpainProvinces.rda")
+list2env(lapply(SpainProvinces, function(x){as.data.frame(t(x))}),envir=.GlobalEnv)
+```
+We work with:
+
+**Predictive variables:**
+
+---> Pollution:
+
+- CO
+- NO2
+- O3
+- SO2
+- PM10
+- PM2.5
+
+---> Environmental:
+
+- Temperature
+- Windspeed
+- Precipitation
+- Insolation
+
+**Response variables**
+
+> - **newCasesTotal** -> Daily COVID-19 cases (Total)
+
+> - **newDeaths** -> Daily COVID-19 deaths
+
+> - **newHospitalized** -> Daily hospitalized COVID-19 patiens
+
+> - **newUCI** -> Daily COVID-19 patiens transferred to ICU
+
+> - **PercentageDeaths.CasesTotal** -> Case fatality rate. Percentage of COVID-19 deaths by total cases. $(Deaths/Cases) \times 100$.
+
+The first 4 response variables here suggested should be normalized:
+
+\[ \frac{Y.va}{population} \times100.000\]
+
+`Y.va` is the variable of interest -then it's the dataframe- and `population` is the population of each city/community. We should not forget to multiply by 100000 inhabitants.
+
+The defined function `norm.porcentaje` achieves the normalization of the data.
+```{r,include=FALSE}
+norma <- function(va1){
+  ifelse(colnames(va1)==colnames(Population), print("ok"),print("hay desorden")) # check if same order
+  nams <- colnames(va1)
+  va1[, nams] <- sweep(va1[, nams], 2, unlist(Population), "/") # divide both dataframes by the same columns
+  return(va1 *100000)} # *100000 is per inhabitants (normalization)
+
+Casos <- norma(newCasesTotal) 
+Muertes <- norma(newDeaths)
+Hospit <- norma(newHospitalized)
+Uci <- norma(newUCI)
+```
+
+## Preprocessing of the data
+
+### Step 1
+
+We remove the provinces from the dataframes that **only** have NA or NaN data and multiply the dataframe `CO` by 1000 so that all the data is on the same scale.
+
+```{r,include=FALSE}
+# Pollution v.a.
+co <- CO[colSums(!is.na(CO)) > 0]*1000 # * 1000 -> same scale (microg/m^3)
+no2 <- NO2[colSums(!is.na(NO2)) > 0]
+pm2.5 <- PM2.5[colSums(!is.na(PM2.5)) > 0]
+o3 <- O3[colSums(!is.na(O3)) > 0]
+so2 <- SO2[colSums(!is.na(SO2)) > 0]
+pm10 <- PM10[colSums(!is.na(PM10)) > 0]
+
+#  Environmental v.a.
+temperature <- Temperature[colSums(!is.na(Temperature)) > 0]
+wind <- WindSpeed[colSums(!is.na(WindSpeed)) > 0]
+preci <- Precipitation[colSums(!is.na(Precipitation)) > 0]
+inso <- Insolation[colSums(!is.na(Insolation)) > 0]
+
+# Response v.a
+casos <- Casos[colSums(!is.na(Casos)) > 0]
+muertes <- Muertes[colSums(!is.na(Muertes)) > 0]
+hospit <- Hospit[colSums(!is.na(Hospit)) > 0]
+uci <- Uci[colSums(!is.na(Uci)) > 0]
+pmuertes.casos <- PercentageDeaths.CasesTotal[colSums(!is.na(PercentageDeaths.CasesTotal)) > 0]
+```
+
+### Step 2
+
+Next, we will study only the common provinces/communities in all our variables.
+
+```{r,include=FALSE}
+# obtain the coincident provinces/communities
+L <- list(co,no2,pm2.5,o3,so2,pm10,temperature,wind,preci,inso,casos,muertes,hospit,uci,pmuertes.casos)
+tab <- table(unlist(lapply(L, names))) # colnames for each dataframe
+names.col <- names(tab[tab == length(L)]) # vector with coincident provinces/communities (colnames)
+#
+
+# Pollution v.a.
+co.s <- subset(co, select=names.col)
+no2.s <- subset(no2, select=names.col)
+pm2.5.s <- subset(pm2.5, select=names.col)
+o3.s <- subset(o3, select=names.col)
+so2.s <- subset(so2, select=names.col)
+pm10.s <- subset(pm10, select=names.col)
+
+#  Environmental v.a.
+temperature.s <- subset(temperature, select=names.col)
+wind.s <- subset(wind, select=names.col)
+preci.s <- subset(preci, select=names.col)
+inso.s <- subset(inso, select=names.col)
+
+# Response v.a
+casos.s <- subset(casos, select=names.col)
+muertes.s <- subset(muertes, select=names.col)
+hospit.s <- subset(hospit, select=names.col)
+uci.s <- subset(uci, select=names.col)
+pmuertes.casos.s <- subset(pmuertes.casos, select=names.col)
+```
+
+### Step 3
+
+We keep the data from **06.21.2020 to 02.22.2021**, because before we were in lockdown, so by not using the cars or leaving the house, it could affect the level of air pollution. On the other hand, the last record is from the 02.23.2021, but since for the majority of the provinces that row has mostly `NA`, we decided to remove it.
+
+(Note: in a bigger project, it could also be studied whether there is a significant difference between the amount of air pollutants before, during and after lockdown).
+
+```{r,include=FALSE}
+fecha <- function(variable){ # obtain the desired time frame
+  variable2 <- tibble::rownames_to_column(variable, "Fecha")
+  variable2 <-xts(variable2,order.by=as.POSIXct(variable2$Fecha), format="%Y/%m/%d") # BUT this
+  # changes the data type to character
+  variable2 <- as.data.frame(variable2['2020-06-21::2021-02-22'])
+  i <- as.double(c(2:ncol(variable2))) # it's necessary to convert the rest of the data
+  # to numeric again
+  variable2[ , i] <- apply(variable2[ , i], 2, function(x) as.numeric(as.character(x)))
+  
+  # check:
+  var3 <- variable2[order(as.Date(variable2$Fecha, format="%Y/%m/%d")),]
+  ifelse(variable2$Fecha == var3$Fecha, print("ok"),print("algo falla")) # chek the dates order
+  ifelse(duplicated(variable2$Fecha), print("ok"),print(nrow(variable2[duplicated(variable2),]))) # print
+  # the number of duplicated
+  return(variable2)}
+
+
+# Pollution v.a.
+o3.sf <- fecha(o3.s)
+co.sf <- fecha(co.s)
+no2.sf <- fecha(no2.s)
+pm2.5.sf <- fecha(pm2.5.s)
+o3.sf <- fecha(o3.s)
+so2.sf <- fecha(so2.s)
+pm10.sf <- fecha(pm10.s)
+
+#  Environmental v.a.
+temperature.sf <- fecha(temperature.s)
+wind.sf <- fecha(wind.s)
+preci.sf <- fecha(preci.s)
+inso.sf <- fecha(inso.s)
+
+# Response v.a
+casos.sf <- fecha(casos.s)
+muertes.sf <- fecha(muertes.s)
+hospit.sf <- fecha(hospit.s)
+uci.sf <- fecha(uci.s)
+pmuertes.casos.sf <- fecha(pmuertes.casos.s)
+
+# Actually there are no duplicates, but it's always good to check.
+```
+
+### Step 4
+
+Now we can remove the columns that have more than 20 NAs:
+
+```{r,include=FALSE}
+nas <- function(variable) {
+  variable2 <- variable[,colSums(is.na(variable)) <= 20]
+  variable2 <- select(variable2, -Fecha) # remove the "Fecha" column too
+  return(variable2)}
+
+
+# Pollution v.a.
+o3.sfn <- nas(o3.sf)
+co.sfn <- nas(co.sf)
+no2.sfn <- nas(no2.sf)
+pm2.5.sfn <- nas(pm2.5.sf)
+o3.sfn <- nas(o3.sf)
+so2.sfn <- nas(so2.sf)
+pm10.sfn <- nas(pm10.sf)
+
+#  Environmental v.a.
+temperature.sfn <- nas(temperature.sf)
+wind.sfn <- nas(wind.sf)
+preci.sfn <- nas(preci.sf)
+inso.sfn <- nas(inso.sf)
+
+# Response v.a
+casos.sfn <- nas(casos.sf)
+muertes.sfn <- nas(muertes.sf)
+hospit.sfn <- nas(hospit.sf)
+uci.sfn <- nas(uci.sf)
+pmuertes.casos.sfn <- nas(pmuertes.casos.sf)
+```
+
+### Step 5
+
+Now that we have removed columns again, the next step is to do another filtering to keep only those columns (remember, they are the provinces / communities) that are coincidents:
+
+```{r,include=FALSE}
+L2 <- list(co.sfn,no2.sfn,pm2.5.sfn,o3.sfn,so2.sfn,pm10.sfn,temperature.sfn,wind.sfn,preci.sfn,inso.sfn,casos.sfn,muertes.sfn,hospit.sfn,uci.sfn,pmuertes.casos.sfn)
+tab <- table(unlist(lapply(L2, names)))
+names.col2 <- names(tab[tab == length(L2)]) 
+
+
+# Pollution v.a.
+co.sfns <- subset(co.sfn, select=names.col2)
+no2.sfns <- subset(no2.sfn, select=names.col2)
+pm2.5.sfns <- subset(pm2.5.sfn, select=names.col2)
+o3.sfns <- subset(o3.sfn, select=names.col2)
+so2.sfns <- subset(so2.sfn, select=names.col2)
+pm10.sfns <- subset(pm10.sfn, select=names.col2)
+
+#  Environmental v.a.
+temperature.sfns <- subset(temperature.sfn, select=names.col2)
+wind.sfns <- subset(wind.sfn, select=names.col2)
+preci.sfns <- subset(preci.sfn, select=names.col2)
+inso.sfns <- subset(inso.sfn, select=names.col2)
+
+# Response v.a
+casos.sfns <- subset(casos.sfn, select=names.col2)
+muertes.sfns <- subset(muertes.sfn, select=names.col2)
+hospit.sfns <- subset(hospit.sfn, select=names.col2)
+uci.sfns <- subset(uci.sfn, select=names.col2)
+pmuertes.casos.sfns <- subset(pmuertes.casos.sfn, select=names.col2)
+```
+
+### Step 6
+
+Create the structure of the dataframe by population through `columns` function: each column will be a variable, and the rows are the different dates:
+
+```{r,include=FALSE}
+columns <- function(poblacion){
+  # EACH V.A AS A COLUMN
+  
+  # First, obtain the columns:
+  # Pollution v.a.
+  co.sfnsc <- data.frame(Date = row.names(co.sfns), co = co.sfns[, poblacion])
+  no2.sfnsc <- data.frame(Date = row.names(no2.sfns), no2 = no2.sfns[, poblacion])
+  pm2.5.sfnsc <- data.frame(Date = row.names(pm2.5.sfns), pm2.5 = pm2.5.sfns[, poblacion])
+  o3.sfnsc <- data.frame(Date = row.names(o3.sfns), o3 = o3.sfns[, poblacion])
+  so2.sfnsc <- data.frame(Date = row.names(so2.sfns), so2 = so2.sfns[, poblacion])
+  pm10.sfnsc <- data.frame(Date = row.names(pm10.sfns), pm10 = pm10.sfns[, poblacion])
+  
+  #  Environmental v.a.
+  temperature.sfnsc <- data.frame(Date = row.names(temperature.sfns), temperature = temperature.sfns[, poblacion])
+  wind.sfnsc <- data.frame(Date = row.names(wind.sfns), wind = wind.sfns[, poblacion])
+  preci.sfnsc <- data.frame(Date = row.names(preci.sfns), preci = preci.sfns[, poblacion])
+  inso.sfnsc <- data.frame(Date = row.names(inso.sfns), inso = inso.sfns[, poblacion])
+
+  # Response v.a
+  casos.sfnsc <- data.frame(Date = row.names(casos.sfns), casos = casos.sfns[, poblacion])
+  muertes.sfnsc <- data.frame(Date = row.names(muertes.sfns), muertes = muertes.sfns[, poblacion])
+  hospit.sfnsc <- data.frame(Date = row.names(hospit.sfns), hospit = hospit.sfns[, poblacion])
+  uci.sfnsc <- data.frame(Date = row.names(uci.sfns), uci = uci.sfns[, poblacion])
+  pmuertes.casos.sfnsc <- data.frame(Date = row.names(pmuertes.casos.sfns), pmuertes.casos = pmuertes.casos.sfns[, poblacion])
+
+  # Then, merge the columns
+  df <- co.sfnsc %>% left_join(no2.sfnsc)  %>% left_join(pm2.5.sfnsc)  %>% left_join(o3.sfnsc) %>% 
+    left_join(so2.sfnsc) %>% left_join(pm10.sfnsc) %>% 
+    
+    left_join(temperature.sfnsc) %>%left_join(wind.sfnsc) %>%
+    left_join(preci.sfnsc) %>% left_join(inso.sfnsc) %>% 
+    
+    left_join(casos.sfnsc) %>% left_join(muertes.sfnsc) %>% left_join(hospit.sfnsc) %>%  
+    left_join(uci.sfnsc) %>%left_join(pmuertes.casos.sfnsc)
+
+  df2 <- na.omit(df) ################ VERY important!! Omit NAs
+  return(df2)
+}
+```
+
+### Step 7
+
+We create different dataframes per population. For this we can simply iterate the vector `names.col2`, which remember, has all the common provinces/communities:
+
+```{r, message=FALSE,include=FALSE}
+poblacion <- function(){
+  for (x in names.col2) { # iterate through the vector names.col2
+    pob <- columns(x) # call the funcion columns()
+    
+    # the code below is to write an appropiate name for the data frame
+    arg.name <- deparse(substitute(x)) # get argument name
+    var.name <- paste("df", arg.name) # construct the name
+    nombre <- make.names(gsub("ñ", "n", var.name)) # change ñ to n
+    nombre <- gsub("[[:punct:]]", "",nombre) # remove punctuation marks
+    nombre <- chartr("áéíóú", "aeiou", nombre) # remove the accents
+    assign(nombre, pob, env=.GlobalEnv) # assign values to variable
+  }
+}
+
+poblacion() # call the function
+```
+
+### Step 8
+
+Next, we obtain a vector with the names of the dataframes that we have created by population. This will be useful for when we want to create a mega data frame of all provinces/communities.
+
+```{r,include=FALSE}
+nombre.ls = c()
+for (x in names.col2) { # iterate through the vector names.col2
+  arg.name <- deparse(substitute(x)) # get argument name
+  var.name <- paste("df", x) # construct the name
+  nombre <- make.names(gsub("ñ", "n", var.name)) # change ñ to n
+  nombre <- gsub("[[:punct:]]", "",nombre)# remove punctuation marks
+  nombre <- chartr("áéíóú", "aeiou", nombre) # remove the accents
+  nombre.ls = c(nombre.ls, nombre)
+}
+```
+
+### Step 9
+
+We create a mega data frame with the defined `gfd` function of all the data frames created by joining by rows (they all have the same structure).
+
+```{r,include=FALSE}
+gdf <- function(){
+  df2 <- data.frame()
+  for (x in nombre.ls) {
+    df <- as.data.frame(get(x)) 
+    df2 <- rbind(df2,df)
+  }
+  return(df2)}
+
+general.df <- gdf() # call the function
+```
+
+## Regression and models
+
+Remove the influential points and group the data by weeks.
+
+```{r fig.height=15, fig.width=15,include=FALSE}
+# casos,muertes,hospit,uci,pmuertes.casos
+
+lmod0 <-lm(uci~pm2.5+pm10+so2+co+no2+o3+temperature+wind+preci+inso,general.df)
+cooksd <- cooks.distance(lmod0)
+sample_size <- nrow(general.df)    
+influential <- as.numeric(names(cooksd)[(cooksd > (4/sample_size))]) # Defining outliers based on 4/n criteria
+df2 <- general.df[-influential, ]
+df2 <- df2 %>% group_by(year = year(Date), week = week(Date)) %>% summarise_if(is.numeric, median)
+lmod <-lm(uci~pm2.5+pm10+so2+co+no2+o3+temperature+wind+preci+inso,df2)
+summary(step(lmod, direction = "both", trace = 1))
+```
+
+```{r fig.height=8, fig.width=10,include=FALSE}
+jpeg("rplot.jpg")
+library(ggcorrplot)
+corr <- cor(df2[,3:17])
+p.mat <- cor_pmat(df2[,3:17])
+ggcorrplot(corr, type = "lower",lab=TRUE,p.mat = p.mat,outline.col = "white", ggtheme = ggplot2::theme_gray, colors = c("#6D9EC1", "white", "#E46726"))
+dev.off()
+```
+
